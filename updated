@@ -1,0 +1,239 @@
+# --------------------------------------------------------
+# PROCESS TABLES
+# --------------------------------------------------------
+
+for idx, table in enumerate(page_tables):
+
+    bbox = table.bbox
+
+    x1, y1, x2, y2 = bbox.x1, bbox.y1, bbox.x2, bbox.y2
+
+    # Convert PDF coords -> image coords
+    x1 = int(x1 * zoom)
+    y1 = int(y1 * zoom)
+    x2 = int(x2 * zoom)
+    y2 = int(y2 * zoom)
+
+    # ----------------------------------------------------
+    # EXPAND INITIAL SEARCH AREA
+    # VERY IMPORTANT
+    # ----------------------------------------------------
+
+    expand = 80
+
+    sx1 = max(0, x1 - expand)
+    sy1 = max(0, y1 - expand)
+
+    sx2 = min(page_image.shape[1], x2 + expand)
+    sy2 = min(page_image.shape[0], y2 + expand)
+
+    roi = page_image[sy1:sy2, sx1:sx2]
+
+    # ----------------------------------------------------
+    # DETECT OUTER TABLE STRUCTURE
+    # ----------------------------------------------------
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+
+    # Invert
+    thresh = cv2.threshold(
+        gray,
+        220,
+        255,
+        cv2.THRESH_BINARY_INV
+    )[1]
+
+    # ----------------------------------------------------
+    # MORPHOLOGY TO CONNECT TABLE LINES
+    # ----------------------------------------------------
+
+    kernel_h = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (80, 1)
+    )
+
+    kernel_v = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (1, 80)
+    )
+
+    horizontal = cv2.morphologyEx(
+        thresh,
+        cv2.MORPH_OPEN,
+        kernel_h
+    )
+
+    vertical = cv2.morphologyEx(
+        thresh,
+        cv2.MORPH_OPEN,
+        kernel_v
+    )
+
+    table_mask = cv2.add(horizontal, vertical)
+
+    # Connect broken borders
+
+    connect_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (15, 15)
+    )
+
+    table_mask = cv2.dilate(
+        table_mask,
+        connect_kernel,
+        iterations=2
+    )
+
+    # ----------------------------------------------------
+    # FIND CONTOURS
+    # ----------------------------------------------------
+
+    contours, _ = cv2.findContours(
+        table_mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    # ----------------------------------------------------
+    # PICK LARGEST CONTOUR
+    # ----------------------------------------------------
+
+    best_area = 0
+    best_rect = None
+
+    for cnt in contours:
+
+        x, y, w, h = cv2.boundingRect(cnt)
+
+        area = w * h
+
+        if area > best_area:
+
+            best_area = area
+            best_rect = (x, y, w, h)
+
+    # ----------------------------------------------------
+    # USE OUTER TABLE RECT
+    # ----------------------------------------------------
+
+    if best_rect is not None:
+
+        bx, by, bw, bh = best_rect
+
+        x1 = sx1 + bx
+        y1 = sy1 + by
+
+        x2 = x1 + bw
+        y2 = y1 + bh
+
+    # ----------------------------------------------------
+    # FINAL SAFETY PADDING
+    # ----------------------------------------------------
+
+    pad = 25
+
+    x1 = max(0, x1 - pad)
+    y1 = max(0, y1 - pad)
+
+    x2 = min(page_image.shape[1], x2 + pad)
+    y2 = min(page_image.shape[0], y2 + pad)
+
+    # ----------------------------------------------------
+    # FIND CAPTION
+    # ----------------------------------------------------
+
+    caption_text = f"table_{idx+1}"
+
+    caption_boxes = []
+
+    for block in text_blocks:
+
+        bx1, by1, bx2, by2, text, *_ = block
+
+        text_clean = text.strip()
+
+        if not text_clean:
+            continue
+
+        if re.match(
+            r"^(Table|TABLE|Figure|FIGURE|Fig\.?)",
+            text_clean
+        ):
+
+            by1_scaled = by1 * zoom
+            by2_scaled = by2 * zoom
+
+            dist_above = abs(by2_scaled - y1)
+            dist_below = abs(by1_scaled - y2)
+
+            if (
+                dist_above < 150
+                or dist_below < 150
+            ):
+
+                caption_boxes.append((
+                    min(dist_above, dist_below),
+                    text_clean,
+                    (
+                        int(bx1 * zoom),
+                        int(by1_scaled),
+                        int(bx2 * zoom),
+                        int(by2_scaled)
+                    )
+                ))
+
+    # ----------------------------------------------------
+    # MERGE CAPTION
+    # ----------------------------------------------------
+
+    if caption_boxes:
+
+        caption_boxes = sorted(
+            caption_boxes,
+            key=lambda x: x[0]
+        )
+
+        _, caption_text, cb = caption_boxes[0]
+
+        cx1, cy1, cx2, cy2 = cb
+
+        x1 = min(x1, cx1 - 20)
+        y1 = min(y1, cy1 - 20)
+
+        x2 = max(x2, cx2 + 20)
+        y2 = max(y2, cy2 + 20)
+
+    # ----------------------------------------------------
+    # CROP
+    # ----------------------------------------------------
+
+    cropped = page_image[y1:y2, x1:x2]
+
+    # ----------------------------------------------------
+    # SAVE
+    # ----------------------------------------------------
+
+    safe_caption = re.sub(
+        r"[^\w\s-]",
+        "",
+        caption_text
+    )
+
+    safe_caption = re.sub(
+        r"\s+",
+        "_",
+        safe_caption
+    )
+
+    filename = (
+        f"{safe_caption}_page_{page_idx+1}.png"
+    )
+
+    out_path = os.path.join(
+        OUTPUT_DIR,
+        filename
+    )
+
+    Image.fromarray(cropped).save(out_path)
+
+    print("Saved:", out_path)
