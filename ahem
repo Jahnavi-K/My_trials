@@ -1,0 +1,198 @@
+import os
+import re
+import fitz
+import cv2
+import numpy as np
+from PIL import Image
+
+from img2table.document import PDF
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+PDF_PATH = "command_json_gen/input/GLP_PEL_1Pt4.pdf"
+OUTPUT_DIR = "cropped_tables"
+
+DPI = 300
+
+# Extra padding around detected table
+PADDING = 30
+
+# Search caption distance
+CAPTION_DISTANCE = 120
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ============================================================
+# LOAD PDF
+# ============================================================
+
+doc = fitz.open(PDF_PATH)
+
+# ============================================================
+# TABLE DETECTION USING IMG2TABLE
+# ============================================================
+
+pdf = PDF(
+    src=PDF_PATH,
+    detect_rotation=False
+)
+
+tables_per_page = pdf.extract_tables(
+    implicit_rows=True,
+    implicit_columns=True,
+    borderless_tables=True
+)
+
+# ============================================================
+# PROCESS EACH PAGE
+# ============================================================
+
+for page_idx, page_tables in enumerate(tables_per_page):
+
+    page = doc[page_idx]
+
+    print(f"\nProcessing page {page_idx+1}")
+
+    # --------------------------------------------------------
+    # RENDER PAGE IMAGE
+    # --------------------------------------------------------
+
+    zoom = DPI / 72
+
+    mat = fitz.Matrix(zoom, zoom)
+
+    pix = page.get_pixmap(matrix=mat)
+
+    img = np.frombuffer(pix.samples, dtype=np.uint8)
+
+    img = img.reshape(pix.height, pix.width, pix.n)
+
+    if pix.n == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+
+    page_image = img.copy()
+
+    # --------------------------------------------------------
+    # GET PAGE TEXT BLOCKS
+    # --------------------------------------------------------
+
+    text_blocks = page.get_text("blocks")
+
+    # --------------------------------------------------------
+    # PROCESS TABLES
+    # --------------------------------------------------------
+
+    for idx, table in enumerate(page_tables):
+
+        bbox = table.bbox
+
+        # img2table gives:
+        # x1, y1, x2, y2
+
+        x1, y1, x2, y2 = bbox.x1, bbox.y1, bbox.x2, bbox.y2
+
+        # Scale coordinates to rendered image
+
+        x1 = int(x1 * zoom)
+        y1 = int(y1 * zoom)
+        x2 = int(x2 * zoom)
+        y2 = int(y2 * zoom)
+
+        # ----------------------------------------------------
+        # ADD SAFE PADDING
+        # ----------------------------------------------------
+
+        x1 = max(0, x1 - PADDING)
+        y1 = max(0, y1 - PADDING)
+
+        x2 = min(page_image.shape[1], x2 + PADDING)
+        y2 = min(page_image.shape[0], y2 + PADDING)
+
+        # ----------------------------------------------------
+        # FIND NEAREST CAPTION
+        # ----------------------------------------------------
+
+        caption_text = f"table_{idx+1}"
+
+        caption_boxes = []
+
+        for block in text_blocks:
+
+            bx1, by1, bx2, by2, text, *_ = block
+
+            text_clean = text.strip()
+
+            if not text_clean:
+                continue
+
+            if re.match(r"^(Table|TABLE|Figure|FIGURE|Fig\.?)", text_clean):
+
+                by1_scaled = by1 * zoom
+                by2_scaled = by2 * zoom
+
+                # Above table
+                dist_above = abs(by2_scaled - y1)
+
+                # Below table
+                dist_below = abs(by1_scaled - y2)
+
+                if (
+                    dist_above < CAPTION_DISTANCE
+                    or dist_below < CAPTION_DISTANCE
+                ):
+
+                    caption_boxes.append((
+                        dist_above,
+                        text_clean,
+                        (
+                            int(bx1 * zoom),
+                            int(by1_scaled),
+                            int(bx2 * zoom),
+                            int(by2_scaled)
+                        )
+                    ))
+
+        # ----------------------------------------------------
+        # PICK CLOSEST CAPTION
+        # ----------------------------------------------------
+
+        if caption_boxes:
+
+            caption_boxes = sorted(caption_boxes, key=lambda x: x[0])
+
+            _, caption_text, cb = caption_boxes[0]
+
+            cx1, cy1, cx2, cy2 = cb
+
+            # merge caption into crop
+
+            x1 = min(x1, cx1 - 20)
+            y1 = min(y1, cy1 - 20)
+
+            x2 = max(x2, cx2 + 20)
+            y2 = max(y2, cy2 + 20)
+
+        # ----------------------------------------------------
+        # CROP
+        # ----------------------------------------------------
+
+        cropped = page_image[y1:y2, x1:x2]
+
+        # ----------------------------------------------------
+        # SAVE
+        # ----------------------------------------------------
+
+        safe_caption = re.sub(r"[^\w\s-]", "", caption_text)
+        safe_caption = re.sub(r"\s+", "_", safe_caption)
+
+        filename = f"{safe_caption}_page_{page_idx+1}.png"
+
+        out_path = os.path.join(OUTPUT_DIR, filename)
+
+        Image.fromarray(cropped).save(out_path)
+
+        print("Saved:", out_path)
+
+print("\nDone.")
