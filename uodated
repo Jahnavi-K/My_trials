@@ -1,0 +1,28 @@
+# ----------------------------------------------------
+# FINAL COORD SANITIZATION
+# ----------------------------------------------------
+
+img_h, img_w = page_image.shape[:2]
+
+x1 = int(max(0, min(x1, img_w - 1)))
+x2 = int(max(0, min(x2, img_w)))
+
+y1 = int(max(0, min(y1, img_h - 1)))
+y2 = int(max(0, min(y2, img_h)))
+
+# Invalid crop check
+if x2 <= x1 or y2 <= y1:
+
+    print("Skipping invalid final crop")
+    print(x1, y1, x2, y2)
+
+    continue
+
+cropped = page_image[y1:y2, x1:x2]
+
+# Empty crop check
+if cropped.size == 0:
+
+    print("Skipping empty cropped image")
+
+    continue
