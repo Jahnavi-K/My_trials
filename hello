@@ -1,0 +1,55 @@
+# =================================================
+# REJECT TEXT-BLOCK FALSE POSITIVES
+# =================================================
+
+drawing_count = 0
+
+drawings = page.get_drawings()
+
+for drawing in drawings:
+
+    for item in drawing["items"]:
+
+        try:
+
+            if item[0] == "l":
+
+                p1 = item[1]
+                p2 = item[2]
+
+                r = fitz.Rect(
+                    min(p1.x, p2.x),
+                    min(p1.y, p2.y),
+                    max(p1.x, p2.x),
+                    max(p1.y, p2.y)
+                )
+
+                # small padding for thin lines
+                r.x0 -= 1
+                r.y0 -= 1
+                r.x1 += 1
+                r.y1 += 1
+
+                if table_rect.intersects(r):
+
+                    drawing_count += 1
+
+            elif item[0] == "re":
+
+                r = fitz.Rect(item[1])
+
+                if table_rect.intersects(r):
+
+                    drawing_count += 1
+
+        except:
+            pass
+
+# paragraph-text false positives
+# usually have very few lines
+
+if drawing_count < 6:
+
+    print("Skipping text-block false positive")
+
+    continue
